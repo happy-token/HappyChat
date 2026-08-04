@@ -1,0 +1,17 @@
+{
+  "name": "happychat-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:assets": "sh ./build-assets.sh",
+    "test": "node --test",
+    "deploy:dry-run": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.118.0"
+  },
+  "overrides": {
+    "undici": "7.29.0"
+  }
+}

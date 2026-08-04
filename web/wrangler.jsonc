@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "happychat-web",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-08-04",
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "chat.happy-token.cn/*",
+      "zone_name": "happy-token.cn"
+    }
+  ],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "none",
+    "run_worker_first": true
+  },
+  "vars": {
+    "BACKEND_ORIGIN": "https://chat-b.happy-token.cn"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
