@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 
 
@@ -56,6 +57,32 @@ class GatewayHandler(BaseHTTPRequestHandler):
     authorization = ""
     path_seen = ""
     content_type_seen = ""
+    model_ids = ["gpt-5.6"]
+
+    def do_GET(self):
+        if self.path.startswith("/catalog?"):
+            body = json.dumps(
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": model_id,
+                            "object": "model",
+                            "owned_by": "happy-token-test",
+                        }
+                        for model_id in type(self).model_ids
+                    ],
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -129,7 +156,10 @@ class ModelAdapterHappyTokenTests(unittest.TestCase):
                 f"http://127.0.0.1:{cls.gateway.server_port}"
             ),
             "HAPPYCHAT_GATEWAY_API_KEY": GATEWAY_KEY,
-            "HAPPYCHAT_GATEWAY_MODELS": "gpt-5.6",
+            "HAPPYCHAT_GATEWAY_CATALOG_URL": (
+                f"http://127.0.0.1:{cls.gateway.server_port}/catalog"
+            ),
+            "HAPPYCHAT_GATEWAY_CATALOG_SECRET": "PROTOTYPE_CATALOG_SECRET",
         }
         cls.adapter = subprocess.Popen(
             [sys.executable, "-B", str(app_dir / "model_adapter.py")],
@@ -164,6 +194,51 @@ class ModelAdapterHappyTokenTests(unittest.TestCase):
         cls.gateway.shutdown()
         cls.gateway.server_close()
         cls.gateway_thread.join(timeout=5)
+
+    def setUp(self):
+        GatewayHandler.model_ids = ["gpt-5.6"]
+
+    def _get_models(self) -> list[str]:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.adapter_port}/v1/models",
+            headers={
+                "Authorization": f"Bearer {SERVICE_KEY}",
+                "X-OpenWebUI-User-Jwt": _user_jwt(),
+            },
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read())
+        return [item["id"] for item in payload["data"]]
+
+    def _invalidate_models(self, service_key: str = SERVICE_KEY):
+        request = urllib.request.Request(
+            (
+                f"http://127.0.0.1:{self.adapter_port}"
+                "/internal/models/cache/invalidate"
+            ),
+            data=b"",
+            headers={"Authorization": f"Bearer {service_key}"},
+            method="POST",
+        )
+        return urllib.request.urlopen(request, timeout=5)
+
+    def test_catalog_invalidation_makes_new_model_visible_immediately(self):
+        self.assertEqual(self._get_models(), ["gpt-5.6"])
+
+        GatewayHandler.model_ids = ["gpt-5.6", "gpt-5.7"]
+        self.assertEqual(self._get_models(), ["gpt-5.6"])
+
+        with self._invalidate_models() as response:
+            self.assertEqual(response.status, 200)
+
+        self.assertEqual(self._get_models(), ["gpt-5.6", "gpt-5.7"])
+
+    def test_catalog_invalidation_rejects_invalid_service_key(self):
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self._invalidate_models("invalid")
+
+        self.assertEqual(raised.exception.code, 401)
+        raised.exception.close()
 
     def test_signed_user_request_reaches_gateway_without_returning_key(self):
         request = urllib.request.Request(

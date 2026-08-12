@@ -24,6 +24,7 @@ def free_port() -> int:
 
 class UpstreamHandler(BaseHTTPRequestHandler):
     calls: list[tuple[str, str]] = []
+    current_role = "admin"
 
     def do_GET(self):
         type(self).calls.append(("GET", self.path))
@@ -45,6 +46,9 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", "oauth-state=test; HttpOnly")
             self.send_header("Content-Length", "0")
             self.end_headers()
+            return
+        if self.path == "/api/v1/auths/":
+            self._json(200, {"role": type(self).current_role})
             return
         self._json(200, {"path": self.path})
 
@@ -73,6 +77,7 @@ class UpstreamHandler(BaseHTTPRequestHandler):
 class ControlProxyTests(unittest.TestCase):
     def setUp(self):
         UpstreamHandler.calls = []
+        UpstreamHandler.current_role = "admin"
         self.upstream_port = free_port()
         self.proxy_port = free_port()
         self.upstream = ThreadingHTTPServer(
@@ -88,6 +93,8 @@ class ControlProxyTests(unittest.TestCase):
             "BIND_HOST": "127.0.0.1",
             "CONTROL_PORT": str(self.proxy_port),
             "OPEN_WEBUI_URL": f"http://127.0.0.1:{self.upstream_port}",
+            "ADAPTER_PORT": str(self.upstream_port),
+            "OPENAI_API_KEY": "PROTOTYPE_CONTROL_SERVICE_KEY",
             "HAPPYCHAT_BLOCK_PUBLIC_LOCAL_AUTH": "true",
         }
         self.proxy = subprocess.Popen(
@@ -149,6 +156,27 @@ class ControlProxyTests(unittest.TestCase):
             self.assertEqual(response.headers["Location"], "https://auth.example/authorize")
             self.assertEqual(response.headers["Set-Cookie"], "oauth-state=test; HttpOnly")
         self.assertEqual(UpstreamHandler.calls, [("GET", "/oauth/oidc/login")])
+
+    def test_explicit_model_refresh_invalidates_gateway_cache_first(self):
+        with self.request("GET", "/api/models?refresh=true") as response:
+            self.assertEqual(response.status, 200)
+
+        self.assertEqual(
+            UpstreamHandler.calls,
+            [
+                ("GET", "/api/v1/auths/"),
+                ("POST", "/internal/models/cache/invalidate"),
+                ("GET", "/api/models?refresh=true"),
+            ],
+        )
+
+    def test_non_admin_model_refresh_cannot_invalidate_gateway_cache(self):
+        UpstreamHandler.current_role = "user"
+
+        with self.request("GET", "/api/models?refresh=true") as response:
+            self.assertEqual(response.status, 403)
+
+        self.assertEqual(UpstreamHandler.calls, [("GET", "/api/v1/auths/")])
 
     def test_websocket_upgrade_is_tunneled_to_open_webui(self):
         request = (

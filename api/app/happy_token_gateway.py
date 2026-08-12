@@ -176,6 +176,8 @@ class HappyTokenGateway:
         self._credential_cache: dict[tuple[str, str], tuple[float, GatewayCredential]] = {}
         self._catalog_cache: tuple[float, list[dict[str, object]]] | None = None
         self._non_chat_catalog_cache: tuple[float, list[dict[str, object]]] | None = None
+        self._catalog_generation = 0
+        self._catalog_lock = threading.Lock()
         self._model_failures: dict[str, tuple[float, int]] = {}
         self._quarantined_models: dict[str, float] = {}
         self._health_lock = threading.Lock()
@@ -279,13 +281,15 @@ class HappyTokenGateway:
             )
 
         now = time.monotonic()
-        cache = (
-            self._non_chat_catalog_cache
-            if include_excluded_models
-            else self._catalog_cache
-        )
-        if cache and cache[0] > now:
-            return self._filter_quarantined_models(cache[1])
+        with self._catalog_lock:
+            generation = self._catalog_generation
+            cache = (
+                self._non_chat_catalog_cache
+                if include_excluded_models
+                else self._catalog_cache
+            )
+            if cache and cache[0] > now:
+                return self._filter_quarantined_models(cache[1])
 
         if self.catalog_url:
             models = self._catalog_via_endpoint(
@@ -308,11 +312,20 @@ class HappyTokenGateway:
             )
         if not models:
             raise GatewayRequestError("Happy Token has no recently healthy models")
-        if include_excluded_models:
-            self._non_chat_catalog_cache = (now + 60, models)
-        else:
-            self._catalog_cache = (now + 60, models)
+        with self._catalog_lock:
+            if generation == self._catalog_generation:
+                if include_excluded_models:
+                    self._non_chat_catalog_cache = (now + 60, models)
+                else:
+                    self._catalog_cache = (now + 60, models)
         return self._filter_quarantined_models(models)
+
+    def invalidate_model_catalog(self) -> None:
+        """Discard cached chat and capability catalogs."""
+        with self._catalog_lock:
+            self._catalog_generation += 1
+            self._catalog_cache = None
+            self._non_chat_catalog_cache = None
 
     def available_model_ids(
         self, *, include_excluded_models: bool = False

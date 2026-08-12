@@ -132,6 +132,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         request_path = urllib.parse.urlsplit(self.path).path
+        if request_path == "/internal/models/cache/invalidate":
+            authorization = self.headers.get("Authorization", "")
+            if not hmac.compare_digest(
+                authorization.encode(),
+                f"Bearer {OPENAI_API_KEY}".encode(),
+            ):
+                self._json(401, {"error": "invalid service credential"})
+                return
+            if HAPPY_TOKEN is None:
+                self._json(503, {"error": "model catalog is unavailable"})
+                return
+            HAPPY_TOKEN.invalidate_model_catalog()
+            self._json(200, {"status": "ok"})
+            return
+
         gateway_path = GATEWAY_POST_PATHS.get(request_path)
         if gateway_path is None:
             self._json(404, {"error": "not found"})

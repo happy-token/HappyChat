@@ -20,36 +20,45 @@ class MockHandler(BaseHTTPRequestHandler):
     requests: list[dict[str, object]] = []
     provision_status = 200
     include_oauth = True
+    catalog_models = [
+        {
+            "id": "gpt-pro::gpt-5.6",
+            "upstream_model": "gpt-5.6",
+            "group": "gpt-pro",
+        },
+        {
+            "id": "gpt-pro::gpt-4o-audio-preview",
+            "upstream_model": "gpt-4o-audio-preview",
+            "group": "gpt-pro",
+        },
+        {
+            "id": "gpt-pro::gpt-4o-realtime-preview",
+            "upstream_model": "gpt-4o-realtime-preview",
+            "group": "gpt-pro",
+        },
+        {
+            "id": "gpt-pro::gpt-image-2",
+            "upstream_model": "gpt-image-2",
+            "group": "gpt-pro",
+        },
+    ]
+    block_next_catalog = False
+    catalog_started = threading.Event()
+    catalog_release = threading.Event()
 
     def do_GET(self):
         self.requests.append({"method": "GET", "path": self.path})
         if self.path.startswith("/models?"):
+            models = [dict(item) for item in type(self).catalog_models]
+            if type(self).block_next_catalog:
+                type(self).block_next_catalog = False
+                type(self).catalog_started.set()
+                type(self).catalog_release.wait(timeout=5)
             self._json(
                 200,
                 {
                     "object": "list",
-                    "data": [
-                        {
-                            "id": "gpt-pro::gpt-5.6",
-                            "upstream_model": "gpt-5.6",
-                            "group": "gpt-pro",
-                        },
-                        {
-                            "id": "gpt-pro::gpt-4o-audio-preview",
-                            "upstream_model": "gpt-4o-audio-preview",
-                            "group": "gpt-pro",
-                        },
-                        {
-                            "id": "gpt-pro::gpt-4o-realtime-preview",
-                            "upstream_model": "gpt-4o-realtime-preview",
-                            "group": "gpt-pro",
-                        },
-                        {
-                            "id": "gpt-pro::gpt-image-2",
-                            "upstream_model": "gpt-image-2",
-                            "group": "gpt-pro",
-                        },
-                    ],
+                    "data": models,
                 },
             )
             return
@@ -306,6 +315,31 @@ class HappyTokenGatewayTests(unittest.TestCase):
         MockHandler.requests = []
         MockHandler.provision_status = 200
         MockHandler.include_oauth = True
+        MockHandler.catalog_models = [
+            {
+                "id": "gpt-pro::gpt-5.6",
+                "upstream_model": "gpt-5.6",
+                "group": "gpt-pro",
+            },
+            {
+                "id": "gpt-pro::gpt-4o-audio-preview",
+                "upstream_model": "gpt-4o-audio-preview",
+                "group": "gpt-pro",
+            },
+            {
+                "id": "gpt-pro::gpt-4o-realtime-preview",
+                "upstream_model": "gpt-4o-realtime-preview",
+                "group": "gpt-pro",
+            },
+            {
+                "id": "gpt-pro::gpt-image-2",
+                "upstream_model": "gpt-image-2",
+                "group": "gpt-pro",
+            },
+        ]
+        MockHandler.block_next_catalog = False
+        MockHandler.catalog_started = threading.Event()
+        MockHandler.catalog_release = threading.Event()
         self.identity = UserIdentity(
             open_webui_user_id="webui-user-1",
             email="user@example.invalid",
@@ -360,6 +394,35 @@ class HappyTokenGatewayTests(unittest.TestCase):
                 "gpt-pro::gpt-4o-realtime-preview",
                 "gpt-pro::gpt-image-2",
             ],
+        )
+
+    def test_catalog_invalidation_prevents_an_inflight_stale_write(self):
+        gateway = HappyTokenGateway(
+            api_base_url=f"{self.base_url}/v1",
+            static_api_key="PROTOTYPE_SHARED_KEY",
+            catalog_url=f"{self.base_url}/models",
+            catalog_secret="PROTOTYPE_CATALOG_SECRET",
+        )
+        MockHandler.catalog_models = [{"id": "gpt-5.6"}]
+        MockHandler.block_next_catalog = True
+        first_result: list[list[dict[str, object]]] = []
+        first_lookup = threading.Thread(
+            target=lambda: first_result.append(gateway.model_catalog()),
+            daemon=True,
+        )
+
+        first_lookup.start()
+        self.assertTrue(MockHandler.catalog_started.wait(timeout=2))
+        MockHandler.catalog_models = [{"id": "gpt-5.6"}, {"id": "gpt-5.7"}]
+        gateway.invalidate_model_catalog()
+        MockHandler.catalog_release.set()
+        first_lookup.join(timeout=2)
+
+        self.assertFalse(first_lookup.is_alive())
+        self.assertEqual([item["id"] for item in first_result[0]], ["gpt-5.6"])
+        self.assertEqual(
+            [item["id"] for item in gateway.model_catalog()],
+            ["gpt-5.6", "gpt-5.7"],
         )
 
     def test_resolves_casdoor_identity_and_provisions_user_token(self):
