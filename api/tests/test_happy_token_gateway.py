@@ -180,9 +180,10 @@ class MockHandler(BaseHTTPRequestHandler):
 
 
 class FakeSQLCursor:
-    def __init__(self):
+    def __init__(self, *, new_user_quota: int = 2_500_000):
         self.queries: list[tuple[str, tuple[object, ...]]] = []
         self._row = None
+        self.new_user_quota = new_user_quota
 
     def __enter__(self):
         return self
@@ -197,6 +198,8 @@ class FakeSQLCursor:
             self._row = None
         elif normalized.startswith("SELECT id, oidc_id FROM users WHERE email"):
             self._row = None
+        elif normalized.startswith("SELECT value FROM options WHERE key"):
+            self._row = (str(self.new_user_quota),)
         elif normalized.startswith("INSERT INTO users"):
             self._row = (42,)
         elif normalized.startswith("SELECT id, key FROM tokens"):
@@ -564,6 +567,12 @@ class HappyTokenGatewayTests(unittest.TestCase):
         self.assertTrue(
             any(statement.startswith("INSERT INTO users") for statement in statements)
         )
+        insert_params = next(
+            parameters
+            for statement, parameters in connection.cursor_instance.queries
+            if statement.startswith("INSERT INTO users")
+        )
+        self.assertEqual(insert_params[5], 2_500_000)
         self.assertTrue(
             any(statement.startswith("INSERT INTO tokens") for statement in statements)
         )
