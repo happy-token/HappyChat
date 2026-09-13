@@ -935,6 +935,7 @@ class HappyTokenGateway:
 
         digest = hashlib.sha256(subject.encode()).hexdigest()[:10]
         username = f"happychat-{digest}"[:20]
+        initial_quota = self._get_new_user_quota(cursor)
         now = int(time.time())
         cursor.execute(
             """
@@ -943,7 +944,7 @@ class HappyTokenGateway:
                 access_token, quota, used_quota, request_count, "group",
                 created_at, last_login_at, oidc_id
             )
-            VALUES (%s, %s, %s, 1, 1, %s, %s, 0, 0, 0, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, 1, 1, %s, %s, %s, 0, 0, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -952,6 +953,7 @@ class HappyTokenGateway:
                 identity.name or username,
                 identity.email,
                 secrets.token_hex(16),
+                initial_quota,
                 self.token_group,
                 now,
                 now,
@@ -962,6 +964,29 @@ class HappyTokenGateway:
         if not row:
             raise GatewayRequestError("Happy Token user provisioning failed")
         return int(row[0])
+
+    @staticmethod
+    def _get_new_user_quota(cursor: Any) -> int:
+        cursor.execute(
+            "SELECT value FROM options WHERE key = %s",
+            ("QuotaForNewUser",),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise GatewayConfigurationError(
+                "Happy Token new-user quota setting is missing"
+            )
+        try:
+            quota = int(_clean(row[0]))
+        except (TypeError, ValueError) as exc:
+            raise GatewayConfigurationError(
+                "Happy Token new-user quota setting is invalid"
+            ) from exc
+        if quota < 0:
+            raise GatewayConfigurationError(
+                "Happy Token new-user quota setting cannot be negative"
+            )
+        return quota
 
     def _find_or_create_token(
         self,
