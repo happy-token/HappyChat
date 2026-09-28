@@ -1,3 +1,5 @@
+import { adminHtml, adminScript } from "./model-admin.mjs";
+
 const DEFAULT_BACKEND_ORIGIN = "https://chat-b.happy-token.cn";
 
 function isNavigation(request) {
@@ -53,6 +55,7 @@ async function proxyRequest(request, env, fetchImpl) {
     method: request.method,
     headers,
     body: request.body,
+    ...(request.body ? { duplex: "half" } : {}),
     redirect: "manual",
   });
   const response = await fetchImpl(upstreamRequest);
@@ -61,6 +64,12 @@ async function proxyRequest(request, env, fetchImpl) {
 
 export async function handleRequest(request, env, fetchImpl = fetch) {
   const url = new URL(request.url);
+  if (["/admin/models", "/admin/models/", "/admin/happychat-models.js"].includes(url.pathname) && ["GET", "HEAD"].includes(request.method)) {
+    const script = url.pathname.endsWith(".js");
+    return withAssetHeaders(new Response(request.method === "HEAD" ? null : script ? adminScript : adminHtml, {
+      headers: { "Content-Type": script ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" },
+    }));
+  }
   if (url.pathname === "/__happychat/health") {
     const response = await proxyRequest(
       new Request(new URL("/health", url), { method: "GET", headers: request.headers }),

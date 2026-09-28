@@ -269,10 +269,17 @@ class HappyTokenGateway:
             )
 
     def model_catalog(
-        self, *, include_excluded_models: bool = False
+        self, *, include_excluded_models: bool = False, apply_policy: bool = True
     ) -> list[dict[str, object]]:
+        from model_policy import apply
+        def finish(items):
+            items = self._filter_quarantined_models(items)
+            try:
+                return apply(items) if apply_policy and not include_excluded_models else items
+            except (OSError, ValueError):
+                raise GatewayConfigurationError('HappyChat model settings are unavailable') from None
         if self.configured_models:
-            return self._filter_quarantined_models(
+            return finish(
                 [
                     self._model_item(model)
                     for model in self.configured_models
@@ -289,7 +296,7 @@ class HappyTokenGateway:
                 else self._catalog_cache
             )
             if cache and cache[0] > now:
-                return self._filter_quarantined_models(cache[1])
+                return finish(cache[1])
 
         if self.catalog_url:
             models = self._catalog_via_endpoint(
@@ -310,7 +317,7 @@ class HappyTokenGateway:
             models = self._pricing_catalog(
                 include_excluded_models=include_excluded_models
             )
-        if not models:
+        if not models and apply_policy:
             raise GatewayRequestError("Happy Token has no recently healthy models")
         with self._catalog_lock:
             if generation == self._catalog_generation:
@@ -318,7 +325,7 @@ class HappyTokenGateway:
                     self._non_chat_catalog_cache = (now + 60, models)
                 else:
                     self._catalog_cache = (now + 60, models)
-        return self._filter_quarantined_models(models)
+        return finish(models)
 
     def invalidate_model_catalog(self) -> None:
         """Discard cached chat and capability catalogs."""
@@ -587,6 +594,13 @@ class HappyTokenGateway:
             raise GatewayRequestError("The Happy Token capability is unavailable", status=404)
 
         requested_model = self._request_model(body, content_type)
+        if path == '/chat/completions':
+            allowed = self.model_catalog()
+            if not any(item['id'] == requested_model or (
+                item.get('upstream_model') == requested_model
+                and item.get('group') == self.token_group
+            ) for item in allowed):
+                raise GatewayRequestError('The selected model is disabled or unavailable', status=403)
         upstream_model, selected_group = self._resolve_model_selection(
             requested_model,
             include_excluded_models=path.startswith("/images/"),

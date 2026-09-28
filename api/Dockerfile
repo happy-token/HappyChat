@@ -3,7 +3,11 @@ FROM python:3.12-slim
 RUN pip install --no-cache-dir psycopg2-binary==2.9.11 \
     && useradd --system --uid 10001 --create-home happychat
 
+RUN mkdir /data && chown happychat:happychat /data
+
 WORKDIR /app
+
+COPY app/model_policy.py /app/model_policy.py
 
 COPY app/happychat_api.py /app/happychat_api.py
 COPY app/control_proxy.py /app/control_proxy.py

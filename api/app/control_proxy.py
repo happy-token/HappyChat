@@ -21,6 +21,7 @@ UPSTREAM_HOST = UPSTREAM_PARTS.hostname
 UPSTREAM_PORT = UPSTREAM_PARTS.port or 80
 MODEL_ADAPTER_URL = f"http://127.0.0.1:{os.environ.get('ADAPTER_PORT', '8000')}"
 MODEL_ADAPTER_SERVICE_KEY = os.environ.get("OPENAI_API_KEY", "")
+PUBLIC_ORIGIN = os.environ.get("HAPPYCHAT_PUBLIC_ORIGIN", "https://chat.happy-token.cn").rstrip("/")
 BLOCK_PUBLIC_LOCAL_AUTH = os.environ.get(
     "HAPPYCHAT_BLOCK_PUBLIC_LOCAL_AUTH", "false"
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -58,6 +59,9 @@ class Handler(BaseHTTPRequestHandler):
             self._proxy_websocket()
             return
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path.rstrip('/') == '/api/happychat/admin/models':
+            self._model_settings()
+            return
         refresh = urllib.parse.parse_qs(parsed.query).get("refresh", ["false"])[-1]
         if (
             parsed.path.rstrip("/") in {"/api/models", "/api/v1/models"}
@@ -83,6 +87,9 @@ class Handler(BaseHTTPRequestHandler):
         self._proxy()
 
     def do_PUT(self):
+        if urllib.parse.urlsplit(self.path).path.rstrip('/') == '/api/happychat/admin/models':
+            self._model_settings()
+            return
         self._proxy()
 
     def do_PATCH(self):
@@ -133,7 +140,71 @@ class Handler(BaseHTTPRequestHandler):
             response = self._request_upstream(path=path)
         except ConnectionAbortedError:
             return
+        path_name = urllib.parse.urlsplit(path or self.path).path.rstrip('/')
+        if self.command == 'GET' and response.status == 200 and path_name in {'/api/config', '/api/models', '/api/v1/models'}:
+            from model_policy import load, apply
+            try:
+                policy = load()
+                payload = json.loads(response.read())
+                if policy['configured']:
+                    if path_name == '/api/config':
+                        payload['default_models'] = policy['default_model']
+                    elif isinstance(payload, dict) and isinstance(payload.get('data'), list):
+                        payload['data'] = apply(payload['data'], policy)
+                self._json(200, payload)
+            except (OSError, ValueError, KeyError, TypeError):
+                self._json(503, {'detail': 'HappyChat model settings are unavailable'})
+            return
         self._send_upstream(response)
+
+    def _model_settings(self):
+        from model_policy import load, save, apply
+        try:
+            if not self._is_admin_request():
+                self.close_connection = True
+                self._json(403, {'detail': '仅管理员可以管理模型'})
+                return
+            from model_adapter import HAPPY_TOKEN
+            if HAPPY_TOKEN is None:
+                self._json(503, {'detail': '模型网关尚未启用'})
+                return
+            if self.command == 'GET' and urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('refresh') == ['true']:
+                HAPPY_TOKEN.invalidate_model_catalog()
+            catalog = HAPPY_TOKEN.model_catalog(apply_policy=False)
+            if self.command == 'PUT':
+                # Browser mutations must carry the existing session bearer token.
+                # Cookie-only cross-site requests cannot change this configuration.
+                origin = self.headers.get('Origin')
+                if origin is not None and origin != PUBLIC_ORIGIN:
+                    self.close_connection = True
+                    self._json(403, {'detail': '仅允许从 HappyChat 页面保存设置'})
+                    return
+                if not self.headers.get('Authorization', '').startswith('Bearer '):
+                    self.close_connection = True
+                    self._json(403, {'detail': '请重新登录后保存设置'})
+                    return
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 1024 * 1024:
+                    self.close_connection = True
+                    self._json(413, {'detail': '设置请求过大或为空'})
+                    return
+                from model_policy import validate
+                policy = validate(json.loads(self.rfile.read(length)))
+                if policy['default_model']:
+                    if not any(m['id'] == policy['default_model'] for m in apply(catalog, policy)):
+                        self._json(400, {'detail': '默认模型必须属于启用的分组和模型列表'})
+                        return
+                save(policy)
+                HAPPY_TOKEN.invalidate_model_catalog()
+            self._json(200, {'policy': load(), 'catalog': catalog})
+        except ConnectionAbortedError:
+            return
+        except (ValueError, UnicodeDecodeError) as error:
+            self.close_connection = True
+            self._json(400, {'detail': str(error)})
+        except Exception:
+            # Gateway and filesystem errors may contain private configuration.
+            self._json(503, {'detail': '模型设置读取或保存失败，请检查服务状态'})
 
     def _proxy_websocket(self):
         upstream_socket = None
@@ -274,6 +345,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

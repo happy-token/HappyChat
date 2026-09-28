@@ -73,3 +73,25 @@ test("health endpoint reports the proxied backend status", async () => {
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { status: "ok", backend_status: 200 });
 });
+
+test('serves the model settings page and its script without replacing other admin pages', async () => {
+  const env = environment(async () => new Response('native-admin'));
+  for (const path of ['/admin/models', '/admin/models/', '/admin/happychat-models.js']) {
+    const response = await handleRequest(new Request('https://chat.happy-token.cn' + path), env, () => assert.fail('no backend fetch'));
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('Cache-Control'), 'no-store');
+    assert.match(await response.text(), /默认模型/);
+  }
+  const native = await handleRequest(new Request('https://chat.happy-token.cn/admin/users'), env);
+  assert.equal(await native.text(), 'native-admin');
+});
+
+test('model settings requests are proxied with the administrator session', async () => {
+  const response = await handleRequest(new Request('https://chat.happy-token.cn/api/happychat/admin/models', {method: 'PUT', headers: {Authorization: 'Bearer test-admin'}, body: '{}'}), environment(() => assert.fail('no assets')), async request => {
+    assert.equal(request.headers.get('Authorization'), 'Bearer test-admin');
+    assert.equal(request.method, 'PUT');
+    assert.equal(await request.text(), '{}');
+    return new Response('{}');
+  });
+  assert.equal(response.status, 200);
+});
